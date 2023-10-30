@@ -37,3 +37,7 @@ Note: This section is for stages 2 and beyond.
    the first time you run it. Subsequent runs will be fast.
 1. Commit your changes and run `git push origin master` to submit your solution
    to CodeCrafters. Test output will be streamed to your terminal.
+
+# Tips
+
+To try this locally on macOS, you could run `./your_server.sh` in one terminal session, and `nc -vz 127.0.0.1 4221` in another. (`-v` gives more verbose output, `-z` just scan for listening daemons, without sending any data to them.)

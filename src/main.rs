@@ -12,6 +12,8 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                //  Handle connection in a thread so this server
+                // can handle multiple concurrent connections.
                 thread::spawn(|| {
                     println!("accepted new connection ({})", stream.peer_addr().unwrap());
                     handle_connection(stream);

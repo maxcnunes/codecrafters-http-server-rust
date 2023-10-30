@@ -34,6 +34,19 @@ struct Request {
     method: String,
     path: String,
     http_info: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Request {
+    fn get_header(&self, key: &str) -> Option<String> {
+        for (k, v) in self.headers.iter() {
+            if key == k {
+                return Some(v.to_string());
+            }
+        }
+
+        return None;
+    }
 }
 
 // TODO: handle errors properly
@@ -49,12 +62,15 @@ fn handle_connection(mut stream: TcpStream) {
         method: String::new(),
         path: String::new(),
         http_info: String::new(),
+        headers: vec![],
     };
 
     // Read all data from this stream
     for (i, l) in reader.lines().enumerate() {
         let line = l.unwrap();
         println!("line {:?}", line);
+
+        // parse request info
         if i == 0 {
             let parts: Vec<&str> = line.split(" ").collect();
             if parts.len() != 3 {
@@ -64,7 +80,15 @@ fn handle_connection(mut stream: TcpStream) {
             req.method = parts[0].to_string();
             req.path = parts[1].to_string();
             req.http_info = parts[2].to_string();
+            continue;
         }
+
+        // parse headers
+        if let Some(parts) = line.split_once(": ") {
+            req.headers.push((parts.0.to_string(), parts.1.to_string()));
+            continue;
+        }
+
         if line == "" {
             // End of the request data
             break;
@@ -75,19 +99,22 @@ fn handle_connection(mut stream: TcpStream) {
 
     println!("Responding");
 
-    let mut res_body = String::new();
+    let mut res_body: Option<String> = None;
 
     let mut status: Status = Status::NotFound;
 
     // Handle routes
-    if req.path == "/" {
+    if req.method == "GET" && req.path == "/" {
         status = Status::OK;
-    } else if req.path.starts_with("/echo/") {
+    } else if req.method == "GET" && req.path.starts_with("/echo/") {
         let parts: Vec<&str> = req.path.split("/").skip(2).collect();
         println!("Parts {:?}", parts);
         let param = parts.join("/");
         println!("Param {}", param);
-        res_body = param.to_string();
+        res_body = Some(param.to_string());
+        status = Status::OK;
+    } else if req.method == "GET" && req.path == "/user-agent" {
+        res_body = req.get_header("User-Agent");
         status = Status::OK;
     }
 
@@ -107,10 +134,10 @@ fn handle_connection(mut stream: TcpStream) {
 
     let mut res_content = format!("HTTP/1.1 {}\r\n", status_text);
 
-    if res_body != "" {
+    if let Some(body) = &res_body {
         res_content.push_str("Content-Type: text/plain\n");
 
-        let cont_len = format!("Content-Length: {}\n", res_body.len());
+        let cont_len = format!("Content-Length: {}\n", body.len());
         res_content.push_str(&cont_len.to_string());
     } else {
         res_content.push_str("\r\n");
@@ -118,8 +145,8 @@ fn handle_connection(mut stream: TcpStream) {
 
     res_content.push_str("\r\n");
 
-    if res_body != "" {
-        res_content.push_str(&res_body);
+    if let Some(body) = &res_body {
+        res_content.push_str(&body);
     }
     println!("{}", res_content);
 

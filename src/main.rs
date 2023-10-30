@@ -24,6 +24,11 @@ fn main() {
     }
 }
 
+enum Status {
+    OK,
+    NotFound,
+}
+
 #[derive(Debug)]
 struct Request {
     method: String,
@@ -70,6 +75,22 @@ fn handle_connection(mut stream: TcpStream) {
 
     println!("Responding");
 
+    let mut res_body = String::new();
+
+    let mut status: Status = Status::NotFound;
+
+    // Handle routes
+    if req.path == "/" {
+        status = Status::OK;
+    } else if req.path.starts_with("/echo/") {
+        let parts: Vec<&str> = req.path.split("/").skip(2).collect();
+        println!("Parts {:?}", parts);
+        let param = parts.join("/");
+        println!("Param {}", param);
+        res_body = param.to_string();
+        status = Status::OK;
+    }
+
     // Write response:
     //
     // Respond with "HTTP/1.1 200 OK\r\n\r\n" (there are two \r\ns at the end)
@@ -79,12 +100,29 @@ fn handle_connection(mut stream: TcpStream) {
     // * The first "\r\n" signifies the end of the status line.
     // * The second "\r\n" signifies the end of the response headers section (which is empty in this case).
     //
-    let status = match req.path.as_str() {
-        "/" => "200 OK",
-        _ => "404 Not Found",
+    let status_text = match status {
+        Status::OK => "200 OK",
+        Status::NotFound => "404 Not Found",
     };
 
-    let res_content = format!("HTTP/1.1 {}\r\n\r\n", status);
+    let mut res_content = format!("HTTP/1.1 {}\r\n", status_text);
+
+    if res_body != "" {
+        res_content.push_str("Content-Type: text/plain\n");
+
+        let cont_len = format!("Content-Length: {}\n", res_body.len());
+        res_content.push_str(&cont_len.to_string());
+    } else {
+        res_content.push_str("\r\n");
+    }
+
+    res_content.push_str("\r\n");
+
+    if res_body != "" {
+        res_content.push_str(&res_body);
+    }
+    println!("{}", res_content);
+
     stream.write(&res_content.into_bytes()).unwrap();
     stream.flush().unwrap();
     println!("Done");

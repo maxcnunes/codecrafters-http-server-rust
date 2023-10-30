@@ -1,22 +1,55 @@
-// Good references:
+// Basic HTTP implementation.
+//
+// HTTP/1.1 RFC - https://datatracker.ietf.org/doc/html/rfc2616/
+//
+// Other helpful references:
 // - https://thepacketgeek.com/rust/tcpstream/reading-and-writing/
 
+use std::env;
+use std::fs;
+use std::io;
 use std::io::BufReader;
 use std::io::{BufRead, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::thread;
 
 fn main() {
+    let mut args = env::args();
+    println!("Args {:?}", args);
+
+    // Parse CLI args
+    let mut param_dir: Option<String> = None;
+    while let Some(arg) = args.next() {
+        println!("arg={:?}", arg);
+        if arg == "--directory" {
+            if let Some(d) = args.next() {
+                param_dir = Some(d);
+            }
+        }
+    }
+    println!("Dir {:?}", param_dir);
+
+    // Creates an ARC (Atomically Reference Counted) to share this immutable value
+    // across multiple threads.
+    let dir = Arc::new(param_dir);
+
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Here there is no value specification as it is a pointer to a
+                // reference in the memory heap.
+                // This creates another pointer to the same allocation, increasing the
+                // strong reference count.
+                let dir = Arc::clone(&dir);
+
                 //  Handle connection in a thread so this server
                 // can handle multiple concurrent connections.
-                thread::spawn(|| {
+                thread::spawn(move || {
                     println!("accepted new connection ({})", stream.peer_addr().unwrap());
-                    handle_connection(stream);
+                    handle_connection(stream, dir);
                 });
             }
             Err(e) => {
@@ -29,6 +62,7 @@ fn main() {
 enum Status {
     OK,
     NotFound,
+    InternalServerError,
 }
 
 #[derive(Debug)]
@@ -36,6 +70,9 @@ struct Request {
     method: String,
     path: String,
     http_info: String,
+    // Use vector instead of a hash map because
+    // header keys are not unique and could there be multiple
+    // headers for the same key.
     headers: Vec<(String, String)>,
 }
 
@@ -52,7 +89,7 @@ impl Request {
 }
 
 // TODO: handle errors properly
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, dir: Arc<Option<String>>) {
     // NOTE: We must read the data before writing any response,
     // otherwise the stream will automatically close the connection
     // and return "Recv failure: Connection reset by peer" to the client.
@@ -101,7 +138,9 @@ fn handle_connection(mut stream: TcpStream) {
 
     println!("Responding");
 
-    let mut res_body: Option<String> = None;
+    // TODO: Could use enum?
+    let mut res_content_type: Option<&str> = None;
+    let mut res_body: Option<Vec<u8>> = None;
 
     let mut status: Status = Status::NotFound;
 
@@ -113,11 +152,36 @@ fn handle_connection(mut stream: TcpStream) {
         println!("Parts {:?}", parts);
         let param = parts.join("/");
         println!("Param {}", param);
-        res_body = Some(param.to_string());
+        res_body = Some(param.to_string().into_bytes());
+        res_content_type = Some("text/plain");
         status = Status::OK;
     } else if req.method == "GET" && req.path == "/user-agent" {
-        res_body = req.get_header("User-Agent");
+        res_body = Some(req.get_header("User-Agent").unwrap().into_bytes());
+        res_content_type = Some("text/plain");
         status = Status::OK;
+    } else if req.method == "GET" && req.path.starts_with("/files/") {
+        let parts: Vec<&str> = req.path.split("/").skip(2).collect();
+        println!("Parts {:?}", parts);
+        let filename = parts[0];
+        println!("File name {}", filename);
+        let filepath = dir.as_ref().to_owned().unwrap() + filename;
+        println!("File path {}", filepath);
+
+        match fs::read(&filepath) {
+            Ok(binary) => {
+                res_body = Some(binary);
+                res_content_type = Some("application/octet-stream");
+                status = Status::OK;
+            }
+            Err(ref e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    status = Status::NotFound;
+                } else {
+                    println!("Unexpected error reading file: {}, err {}", filepath, e);
+                    status = Status::InternalServerError;
+                }
+            }
+        }
     }
 
     // Write response:
@@ -132,27 +196,24 @@ fn handle_connection(mut stream: TcpStream) {
     let status_text = match status {
         Status::OK => "200 OK",
         Status::NotFound => "404 Not Found",
+        Status::InternalServerError => "500 Internal Server Error",
     };
 
-    let mut res_content = format!("HTTP/1.1 {}\r\n", status_text);
+    write!(&mut stream, "HTTP/1.1 {}\r\n", status_text).unwrap();
 
     if let Some(body) = &res_body {
-        res_content.push_str("Content-Type: text/plain\n");
-
-        let cont_len = format!("Content-Length: {}\n", body.len());
-        res_content.push_str(&cont_len.to_string());
+        write!(&mut stream, "Content-Type: {}\n", res_content_type.unwrap()).unwrap();
+        write!(&mut stream, "Content-Length: {}\n", body.len()).unwrap();
     } else {
-        res_content.push_str("\r\n");
+        write!(&mut stream, "\r\n").unwrap();
     }
 
-    res_content.push_str("\r\n");
+    write!(&mut stream, "\r\n").unwrap();
 
     if let Some(body) = &res_body {
-        res_content.push_str(&body);
+        stream.write(&body).unwrap();
     }
-    println!("{}", res_content);
 
-    stream.write(&res_content.into_bytes()).unwrap();
     stream.flush().unwrap();
     println!("Done");
 }

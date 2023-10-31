@@ -60,8 +60,14 @@ fn main() {
 }
 
 enum Status {
+    // 2xx
     OK,
+    Created,
+
+    // 4xx
     NotFound,
+
+    // 5xx
     InternalServerError,
 }
 
@@ -74,6 +80,7 @@ struct Request {
     // header keys are not unique and could there be multiple
     // headers for the same key.
     headers: Vec<(String, String)>,
+    body: String,
 }
 
 impl Request {
@@ -95,22 +102,43 @@ fn handle_connection(mut stream: TcpStream, dir: Arc<Option<String>>) {
     // and return "Recv failure: Connection reset by peer" to the client.
 
     // Wrap stream with Bufreader
-    let reader = BufReader::new(&mut stream);
+    let mut reader = BufReader::new(&mut stream);
 
     let mut req = Request {
         method: String::new(),
         path: String::new(),
         http_info: String::new(),
         headers: vec![],
+        body: String::new(),
     };
 
+    let mut has_body = false;
+    let mut is_first = true;
+
     // Read all data from this stream
-    for (i, l) in reader.lines().enumerate() {
-        let line = l.unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+
+    loop {
+        let _ = buf.clear();
+        let bytes = reader.read_until(b'\n', &mut buf).unwrap();
+        if bytes == 0 {
+            break;
+        };
+
+        let line = std::str::from_utf8(&buf).unwrap();
+
         println!("line {:?}", line);
+        if line == "\r\n" {
+            // This means the whole header has been read,
+            // and any data next is part of the body.
+            break;
+        }
+
+        let line = line.strip_suffix("\r\n").unwrap();
 
         // parse request info
-        if i == 0 {
+        if is_first {
+            is_first = false;
             let parts: Vec<&str> = line.split(" ").collect();
             if parts.len() != 3 {
                 panic!("Bad first line format {:?}", parts);
@@ -124,14 +152,23 @@ fn handle_connection(mut stream: TcpStream, dir: Arc<Option<String>>) {
 
         // parse headers
         if let Some(parts) = line.split_once(": ") {
-            req.headers.push((parts.0.to_string(), parts.1.to_string()));
+            let key = parts.0.to_string();
+            let val = parts.1.to_string();
+
+            if key == "Content-Length" {
+                has_body = true;
+            }
+
+            req.headers.push((key, val));
+
             continue;
         }
+    }
 
-        if line == "" {
-            // End of the request data
-            break;
-        }
+    if has_body {
+        let received: Vec<u8> = reader.fill_buf().unwrap().to_vec();
+        reader.consume(received.len());
+        req.body = String::from_utf8(received).unwrap();
     }
 
     println!("Request {:?}", req);
@@ -182,6 +219,17 @@ fn handle_connection(mut stream: TcpStream, dir: Arc<Option<String>>) {
                 }
             }
         }
+    } else if req.method == "POST" && req.path.starts_with("/files/") {
+        let parts: Vec<&str> = req.path.split("/").skip(2).collect();
+        println!("Parts {:?}", parts);
+        let filename = parts[0];
+        println!("File name {}", filename);
+        let filepath = dir.as_ref().to_owned().unwrap() + filename;
+        println!("File path {}", filepath);
+
+        fs::write(filepath, req.body).unwrap();
+        res_content_type = Some("application/octet-stream");
+        status = Status::Created;
     }
 
     // Write response:
@@ -195,6 +243,7 @@ fn handle_connection(mut stream: TcpStream, dir: Arc<Option<String>>) {
     //
     let status_text = match status {
         Status::OK => "200 OK",
+        Status::Created => "201 Created",
         Status::NotFound => "404 Not Found",
         Status::InternalServerError => "500 Internal Server Error",
     };
